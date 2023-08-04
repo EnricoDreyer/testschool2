@@ -1,0 +1,682 @@
+//ucSummary.ascx.cs
+
+using MM3.R2.Common.Models;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Web;
+using System.Web.UI;
+using System.Web.UI.WebControls;
+using System.Data.Entity;
+using MyMembership.Web.UI.Logic;
+using MM3.R2.DataAccess.Concrete;
+using System.Threading.Tasks;
+using System.Net.Http;
+using Newtonsoft.Json;
+using System.Configuration;
+
+namespace MyMembership.Web.UI.designations.tools
+{
+    public partial class ucSummary : ApplicationControl
+    {
+        MM3Context db = new MM3Context();
+        protected void Page_Load(object sender, EventArgs e)
+        {
+            if (!Page.IsPostBack)
+                BindData();
+        }
+
+        void BindData()
+        {
+            string role = DesignationUtils.DesignationRole.Assessor.ToString();
+
+            var assessors = db.MemberDesignationReviewers.Where(x => x.MemberDesignationApplicationId == ApplicationId && x.ReviewType.Equals(role)).ToList();
+
+            var memberDesignation = db.MemberDesignationApplicationViews.FirstOrDefault(x => x.Id.Equals(ApplicationId));
+            if (memberDesignation != null)
+            {
+                litName.Text = memberDesignation.Firstname + " " + memberDesignation.Lastname;
+                litDateApplied.Text = memberDesignation.DateCreated.ToString("dd MMM yyyy");
+                if (memberDesignation.Completed)
+                    litDateCompleted.Text = memberDesignation.DateCompleted.ToString("dd MMM yyyy");
+                if (memberDesignation.DateSubmitted.HasValue)
+                    litDateSubmitted.Text = memberDesignation.DateSubmitted.Value.ToString("dd MMM yyyy");
+                if (!String.IsNullOrEmpty(memberDesignation.Designation))
+                    litDesignation.Text = memberDesignation.Designation;
+                litMembershipNumber.Text = memberDesignation.MembershipNumber.CheckNull();
+                var settings = db.CommunityDesignationSettings.FirstOrDefault(x => x.CommunityId.Equals(memberDesignation.CommunityId));
+                if (!settings.AutoApproveDesignation)
+                    btnDesignation.Visible = memberDesignation.DesignationApplicationStatusId.Equals(1);
+            }
+            int designationId = memberDesignation.DesignationId ?? 0;
+            var memberDesignationStages = db.MemberDesignationStages.Include(x => x.DesignationStage).Where(x => x.MemberDesignationApplicationId.Equals(ApplicationId));
+            var memberDesignationStageLogs = db.MemberDesignationStageLogs.Include(x => x.DesignationStage).Where(x => x.MemberDesignationApplicationId.Equals(ApplicationId));
+            var stages = db.CommunityDesignationStages.Include(x => x.DesignationStage).Where(x => x.CommunityId.Equals(CommunityGUID) && x.CommunityDesignationSettingId == memberDesignation.CommunityDesignationSettingId && (x.DesignationId.HasValue.Equals(false) || x.DesignationId.HasValue.Equals(true) && x.DesignationId.Value.Equals(designationId))).OrderBy(x => x.StageNumber)
+                 .Select(x => new StageModel
+                 {
+                     Id = x.Id,
+                     StageName = x.StageName,
+                     Notes = x.Notes,
+                     StageNumber = x.StageNumber,
+                     Code = x.DesignationStage.Code,
+                     AdminReview = false,
+                     DesignationStageId = x.DesignationStageId
+                 }).OrderBy(x => x.StageNumber).ToList();
+
+
+            var stageLogs = memberDesignationStageLogs.Select(x => new StageModelLog
+            {
+                Id = x.Id,
+                Status = x.Status,
+                DateCreated = x.DateCreated,
+                UpdatedBy = x.LastUpdateUsername,
+                DesignationStageId = x.CommunityDesignationStageId,
+                PreviousDesignationStageId=x.PreviousCommunityDesignationStageId
+            }).OrderByDescending(x => x.DateCreated).ToList();
+            stageLogs.ForEach(x =>
+            {
+                var stage = stages.FirstOrDefault(z => z.Id == x.DesignationStageId);
+                if (stage != null)
+                {
+                    x.StageName = stage.StageName;
+                }
+                var previous = stages.FirstOrDefault(z => z.Id == x.PreviousDesignationStageId);
+                if (previous != null)
+                {
+                    x.PreviousStage = previous.StageName;
+                }
+                else
+                {
+                    x.PreviousStage = "";
+                }
+            });
+
+                stages.ForEach(x =>
+            {
+                var profile = memberDesignationStages.FirstOrDefault(z => z.CommunityDesignationStageId.Equals(x.Id) && z.Completed.Equals(true) && z.DesignationStageId.Equals(x.DesignationStageId));
+                if (profile != null)
+                {
+                    x.DateCompleted = profile.DateCompleted;
+                    x.UpdatedBy = profile.LastUpdateUsername;
+                    x.DateUpdated = profile.DateUpdated;
+                    x.UndoStage = true;
+                }
+                else
+                {
+                    x.DateCompleted = new Nullable<DateTime>();
+                    x.DateUpdated = new Nullable<DateTime>();
+                    x.UpdatedBy = string.Empty;
+                    x.UndoStage = false;
+                }
+                var currentStage = memberDesignationStages.FirstOrDefault(z => z.CommunityDesignationStageId.Equals(x.Id) && z.Completed.Equals(false));
+                if (currentStage != null)
+                {
+                    x.CurrentStage = "<img src='/bulkmail/images/Check.png' border='0'/>";
+                }
+                else
+                {
+                    x.CurrentStage = "";
+
+                }
+                if (string.IsNullOrEmpty(x.Notes))
+                    x.NoteUrl = "";
+                if (x.Code.Equals("assessor") && assessors.Count().Equals(0))
+                {
+                    x.Notes = "No assessors assigned";
+                }
+                else
+                    x.Notes = "";
+                x.StageStatus = DisplayStageStatus(x.Id, x.DesignationStageId);
+                x.StageUrl = StageStatus(x.Id, x.DesignationStageId);
+                profile = memberDesignationStages.FirstOrDefault(z => z.CommunityDesignationStageId.Equals(x.Id));
+                if (profile != null)
+                {
+                    x.AdminReview = profile.AdminReview;
+                }
+                x.CompleteStage = StageCompleteStatus(x.Id, x.StageNumber);
+            });
+            grdData.DataSource = stages;
+            grdData.DataBind();
+            var assessorHistory = db.MemberDesignationAssessmentViews.Where(x => x.MemberDesignationApplicationId.Equals(ApplicationId)).OrderByDescending(x => x.AssessorDate).ToList();
+            grdAssessmentHistory.DataSource = assessorHistory;
+            grdAssessmentHistory.DataBind();
+
+            var statusUpdates = db.MemberDesignationApplicationNotes.Where(x => x.MemberDesignationApplicationId.Equals(ApplicationId)).OrderByDescending(x => x.DateCreated).ToList();
+            grdStatus.DataSource = statusUpdates;
+            grdStatus.DataBind();
+
+            var logs = db.MemberDesignationApplicationLogs.Where(x => x.MemberDesignationApplicationId.Equals(ApplicationId)).OrderByDescending(x => x.DateCreated).ToList();
+            grdLogs.DataSource = logs;
+            grdLogs.DataBind();
+
+            grdStageHistory.DataSource = stageLogs;
+            grdStageHistory.DataBind();
+
+            var memberProfile = db.MemberSearchViews.FirstOrDefault(x => x.CommunityId.Equals(CommunityGUID) && x.MemberId.Equals(MemberGUID));
+            var memberType = db.MemberTypes.FirstOrDefault(x => x.CommunityId.Equals(CommunityGUID) && x.MemberId.Equals(MemberGUID));
+            var _memberDesignation = db.MemberDesignationViews.FirstOrDefault(x => x.CommunityId.Equals(CommunityGUID) && x.MemberId.Equals(MemberGUID));
+            if (memberProfile != null)
+            {
+                litAccountNo.Text = memberProfile.AccountNumber;
+                litMemberType.Text = $"<a href='/members/member.aspx?memberid={MemberGUID}&communityid={CommunityGUID}&tb=1'>{memberProfile.MembershipType.CheckNull()}</a>";
+                litMemberStartDate.Text = memberType.StartDate.HasValue ? memberType.StartDate.Value.ToString("dd MMM yyyy") : "";
+                litEmail.Text = memberProfile.Email.CheckNull();
+                litMobile.Text = memberProfile.Mobile.CheckNull();
+                if (_memberDesignation != null)
+                {
+                    if (!string.IsNullOrEmpty(_memberDesignation.DesignationName))
+                        litCurrentDesignation.Text = $"<a href='/members/member.aspx?memberid={MemberGUID}&communityid={CommunityGUID}&tb=13'>{_memberDesignation.DesignationName.CheckNull()}</a>";
+                    litCurrentDesignationStartDate.Text = _memberDesignation.StartDate.ToString("dd MMM yyyy");
+                    litCurrentDesignationEndDate.Text = _memberDesignation.EndDate.HasValue ? _memberDesignation.EndDate.Value.ToString("dd MMM yyyy") : "";
+                }
+                else
+                    trDesignation.Visible = trDesignation1.Visible = trDesignation2.Visible = false;
+                try
+                {
+                    var commsEvo = AccountsIntegration.GetCommunitiesWithIntegration("evolution");
+                    var comms = AccountsIntegration.GetCommunitiesWithIntegration("sageone");
+                    if (comms.Select(a => a.Id).Contains(CurrentCommunityId) && !commsEvo.Select(a => a.Id).Contains(CurrentCommunityId))
+                    {
+                        var customer = GetCustomerFromRemote().ConfigureAwait(false).GetAwaiter().GetResult();
+                        if (customer != null)
+                            litBalance.Text = $"{customer?.Balance}";
+                        else
+                            litBalance.Text = "";
+                    }
+                    else if (commsEvo.Select(a => a.Id).Contains(CurrentCommunityId))
+                    {
+                        var connector = new EvolutionConnector(CurrentCommunityId);
+                        if (connector.HasEvolution)
+                        {
+                            var evoAccount = connector.GetEvolutionAccount(this.MemberCommunity?.AccountNumber).ConfigureAwait(false).GetAwaiter().GetResult();
+                            if (evoAccount != null)
+                            {
+                                var convergePay = ConfigurationManager.AppSettings["convergePayCommunities"];
+                                if (string.IsNullOrEmpty(convergePay))
+                                    convergePay = string.Empty;
+                                var cultureCode = "en-za";
+                                if (convergePay.ToLower().Contains(Session["communityid"].ToString().ToLower()))
+                                    cultureCode = "en-us";
+                                var culture = new System.Globalization.CultureInfo(cultureCode);
+                                litBalance.Text = evoAccount.AccountBalance.ToString("C", culture);
+                            }
+                        }
+                    }
+                    else
+                    {
+                        litBalance.Text = "";
+                    }
+                }
+                catch { }
+            }
+        }
+
+        public MemberCommunity MemberCommunity => db.MemberCommunities.FirstOrDefault(x => x.CommunityId == CurrentCommunityId && x.MemberId == MemberGUID);
+        private async Task<MM3.R2.DataAccess.SageOne.Customer> GetCustomerFromRemote()
+        {
+            var setupItem = AccountsIntegration.GetCommunityAccountingIntegration(CurrentCommunityId);
+            if (setupItem != null)
+            {
+
+                using (var client = new HttpClient())
+                {
+                    client.BaseAddress = new Uri(setupItem.BaseApiUri);
+                    client.DefaultRequestHeaders.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
+                    client.DefaultRequestHeaders.Add("x-apikey", setupItem.IntegrationKey);
+                    client.DefaultRequestHeaders.Add("x-company-key", setupItem.Base64AuthorizationCode);
+                    client.DefaultRequestHeaders.Add("x-company-id", setupItem.CompanyUniqueId?.ToString());
+                    var results = await client.GetAsync($"{setupItem.GetCustomerEndpoint.TrimEnd('/')}/{MemberCommunity?.AccountNumber}").ConfigureAwait(false);
+                    if (results.IsSuccessStatusCode)
+                    {
+                        var resultString = await results.Content.ReadAsStringAsync().ConfigureAwait(false);
+                        if (!string.IsNullOrEmpty(resultString))
+                        {
+                            var customersAccounts = JsonConvert.DeserializeObject<MM3.R2.DataAccess.SageOne.Customer>(resultString);
+                            return customersAccounts;
+                        }
+                    }
+                }
+            }
+            return null;
+        }
+        private async Task<MM3.R2.DataAccess.SageOne.Customer> GetCustomerFromRemote(Guid communityId, string accountNumber)
+        {
+            var setupItem = AccountsIntegration.GetCommunityAccountingIntegration(communityId);
+            if (setupItem != null)
+            {
+
+                using (var client = new HttpClient())
+                {
+                    client.BaseAddress = new Uri(setupItem.BaseApiUri);
+                    client.DefaultRequestHeaders.Accept.Add(new System.Net.Http.Headers.MediaTypeWithQualityHeaderValue("application/json"));
+                    client.DefaultRequestHeaders.Add("x-apikey", setupItem.IntegrationKey);
+                    client.DefaultRequestHeaders.Add("x-company-key", setupItem.Base64AuthorizationCode);
+                    client.DefaultRequestHeaders.Add("x-company-id", setupItem.CompanyUniqueId?.ToString());
+                    var results = await client.GetAsync($"{setupItem.GetCustomerEndpoint}/{accountNumber}");
+                    if (results.IsSuccessStatusCode)
+                    {
+                        var resultString = await results.Content.ReadAsStringAsync();
+                        if (!string.IsNullOrEmpty(resultString))
+                        {
+                            var customersAccounts = JsonConvert.DeserializeObject<MM3.R2.DataAccess.SageOne.Customer>(resultString);
+                            return customersAccounts;
+                        }
+                    }
+                }
+            }
+            return null;
+        }
+
+        public bool StageCompleteStatus(int communityStageId, int stageNumber)
+        {
+            var memberDesignation = db.MemberDesignationApplications.FirstOrDefault(x => x.Id.Equals(ApplicationId));
+            if (memberDesignation.DesignationApplicationStatusId.Equals(1))
+                return false;
+            var memberDesignationStage = db.MemberDesignationStages.FirstOrDefault(x => x.MemberDesignationApplicationId.Equals(ApplicationId) && x.Completed.Equals(true) && x.CommunityDesignationStageId.Equals(communityStageId));
+            if (memberDesignationStage != null)
+                return false;
+            else
+            {
+                memberDesignationStage = db.MemberDesignationStages.FirstOrDefault(x => x.MemberDesignationApplicationId.Equals(ApplicationId) && x.Completed.Equals(false) && x.CommunityDesignationStageId.Equals(communityStageId));
+                if (memberDesignationStage != null)
+                {
+                    if (memberDesignationStage.AdminReview)
+                        return false;
+                    else
+                        return true;
+                }
+                List<int> previousStepIds = db.CommunityDesignationStages.Where(x => x.CommunityId.Equals(CommunityGUID) && x.StageNumber < stageNumber).Select(x => x.Id).ToList();
+                if (previousStepIds.Count.Equals(0))
+                {
+                    return true;
+                }
+                else
+                {
+                    var previousStages = db.MemberDesignationStages.Where(x => x.MemberDesignationApplicationId.Equals(ApplicationId) && previousStepIds.Contains(x.CommunityDesignationStageId)).Count();
+                    int pendingCount = db.MemberDesignationStages.Where(x => x.MemberDesignationApplicationId.Equals(ApplicationId) && x.Completed.Equals(false) && previousStepIds.Contains(x.CommunityDesignationStageId)).Count();
+                    if (pendingCount.Equals(0))
+                    {
+                        pendingCount = db.MemberDesignationStages.Where(x => x.MemberDesignationApplicationId.Equals(ApplicationId) && x.Completed.Equals(true) && x.AdminReview.Equals(true) && previousStepIds.Contains(x.CommunityDesignationStageId)).Count();
+                    }
+                    if (previousStages != previousStepIds.Count())
+                        pendingCount = previousStepIds.Count();
+                    if (pendingCount > 0)
+                        return false;
+                    else
+                    {
+                        return true;
+                    }
+
+
+                }
+            }
+        }
+
+
+        private class StageModel
+        {
+            public int Id { get; set; }
+            public string StageName { get; set; }
+            public string Notes { get; set; }
+            public string NoteUrl { get; set; }
+            public int DesignationStageId { get; set; }
+            public int StageNumber { get; set; }
+            public string Code { get; set; }
+            public string StageStatus { get; set; }
+            public bool AdminReview { get; set; }
+            public string StageUrl { get; set; }
+            public string CurrentStage { get; set; }
+            public bool CompleteStage { get; set; }
+            public bool UndoStage { get; set; }
+
+            public DateTime? DateCompleted { get; set; }
+            public DateTime? DateUpdated { get; set; }
+            public string UpdatedBy { get; set; }
+
+        }
+
+        private class StageModelLog
+        {
+            public int Id { get; set; }
+
+            public string PreviousStage { get; set; }
+            public string StageName { get; set; }
+            public string Status { get; set; }
+            public DateTime DateCreated { get; set; }
+            public string UpdatedBy { get; set; }
+            public int DesignationStageId { get; set; }
+            public int PreviousDesignationStageId { get; set; }
+
+        }
+        private Guid CommunityGUID => (Page as ApplicationPage).CurrentCommunityId;
+
+        private Guid MemberGUID
+        {
+            get
+            {
+                return Guid.Parse(Request.QueryString.Get("memberId"));
+            }
+        }
+
+
+        private int ApplicationId
+        {
+            get
+            {
+                return Int32.Parse(Request.QueryString.Get("Id"));
+            }
+        }
+
+        public string GetAssessmentLink(object val)
+        {
+            if (val == null)
+                return "";
+            try
+            {
+                int assessmentId = val.CheckNull().ConvToInt();
+                if (assessmentId > 0)
+                    return $"<a href=\"/designations/view.aspx?Id={ApplicationId}&memberId={MemberGUID}&attemptId={assessmentId}&tb=1\">Responses</a>";
+            }
+            catch { }
+            return "";
+        }
+
+        public string GetEditLink(object val)
+        {
+            if (val == null)
+                return "";
+            try
+            {
+                int statusId = val.CheckNull().ConvToInt();
+                if (statusId > 0)
+                    return $"<a href=\"/designations/view.aspx?Id={ApplicationId}&memberId={MemberGUID}&statusId={statusId}&tb=11\">Edit</a>";
+            }
+            catch { }
+            return "";
+        }
+
+
+
+        public String StageStatus(int communityStageId, int stageId)
+        {
+            var stage = db.DesignationStages.FirstOrDefault(x => x.Id.Equals(stageId));
+            var memberDesignationStage = db.MemberDesignationStages.FirstOrDefault(x => x.MemberDesignationApplicationId.Equals(ApplicationId) && x.Completed.Equals(true) && x.DesignationStageId.Equals(stageId) && x.CommunityDesignationStageId.Equals(communityStageId));
+            if (memberDesignationStage != null)
+            {
+                if (memberDesignationStage.AdminReview)
+                    return "Waiting for review";
+                switch (stage.Code)
+                {
+                    case "assessment":
+                        return $"<a class=\"btn btn-link\"  href='/designations/view.aspx?Id={ApplicationId}&memberId={MemberGUID}&CommunityId={CurrentCommunityId}&tb=3'>&nbsp;View</a> ";
+                    case "documents":
+                        return $"<a class=\"btn btn-link\" href='/designations/view.aspx?Id={ApplicationId}&memberId={MemberGUID}&CommunityId={CurrentCommunityId}&tb=2'>&nbsp;View</a> ";
+                    case "update":
+                        return $"<a  class=\"btn btn-link\"   href='/members/member.aspx?memberId={MemberGUID}&CommunityId={CurrentCommunityId}&tb=1'>&nbsp;View</a> ";
+                    default:
+                        return "";
+                }
+            }
+            else
+            {
+                memberDesignationStage = db.MemberDesignationStages.FirstOrDefault(x => x.MemberDesignationApplicationId.Equals(ApplicationId) && x.AdminReview.Equals(true) && x.DesignationStageId.Equals(stageId) && x.CommunityDesignationStageId.Equals(communityStageId));
+
+                if (memberDesignationStage != null)
+                    return "Waiting for review";
+                else
+                    return "<img src = '/bulkmail/images/Block.png' border = '0' />";
+            }
+        }
+
+        public String DisplayStageStatus(int communityStageId, int stageId)
+        {
+            var stage = db.DesignationStages.FirstOrDefault(x => x.Id.Equals(stageId));
+            var memberDesignation = db.MemberDesignationApplications.FirstOrDefault(x => x.Id.Equals(ApplicationId));
+            var memberDesignationStage = db.MemberDesignationStages.FirstOrDefault(x => x.MemberDesignationApplicationId.Equals(ApplicationId) && x.Completed.Equals(true) && x.DesignationStageId.Equals(stageId) && x.CommunityDesignationStageId.Equals(communityStageId));
+
+            if (memberDesignationStage != null)
+            {
+                if (memberDesignationStage.AdminReview)
+                    return "Waiting for review";
+                return "<img src='/bulkmail/images/Check.png' border='0'/>";
+            }
+            else
+            {
+                return "<img src = '/bulkmail/images/Block.png' border = '0' />";
+            }
+        }
+
+        protected void btnSave_Click(object sender, EventArgs e)
+        {
+            Response.Redirect($"/designations/view.aspx?Id={ApplicationId}&memberId={MemberGUID}&tb=4");
+        }
+
+        protected void btnDesignation_Click(object sender, EventArgs e)
+        {
+            var memberDesignation = db.MemberDesignationApplications.FirstOrDefault(x => x.Id.Equals(ApplicationId));
+            int designationId = memberDesignation.DesignationId ?? 0;
+            Response.Redirect($"/members/member.aspx?memberId={memberDesignation.MemberId}&CommunityId={memberDesignation.CommunityId}&applicationId={memberDesignation.Id}&tb=13");
+
+
+        }
+
+        protected void lnkChange_Click(object sender, EventArgs e)
+        {
+            Response.Redirect($"/designations/view.aspx?Id={ApplicationId}&memberId={MemberGUID}&tb=6");
+        }
+
+        protected void GridView1_RowCommand(object sender, GridViewCommandEventArgs e)
+        {
+            if (e.CommandName == "completeReview")
+            {
+                int stageId = Convert.ToInt32(e.CommandArgument.ToString());
+                var memberDesignationStage = db.MemberDesignationStages.FirstOrDefault(x => x.MemberDesignationApplicationId.Equals(ApplicationId) && x.CommunityDesignationStageId.Equals(stageId));
+                if (memberDesignationStage != null)
+                {
+                    memberDesignationStage.AdminReview = false;
+                    memberDesignationStage.DateCreated = DateTime.Now;
+                    memberDesignationStage.DateUpdated = DateTime.Now;
+                    memberDesignationStage.LastUpdateUsername = CurrentUser;
+                    memberDesignationStage.Archived = false;
+                    db.SaveChanges();
+
+                    var memberDesignationStageLog = new MemberDesignationStageLog();
+                    memberDesignationStageLog.MemberDesignationApplicationId = ApplicationId;
+                    memberDesignationStageLog.CommunityId = CommunityGUID;
+                    memberDesignationStageLog.TransactionId = Guid.NewGuid();
+                    memberDesignationStageLog.MemberId = MemberGUID;
+                    memberDesignationStageLog.DesignationStageId = memberDesignationStage.DesignationStageId;
+                    memberDesignationStageLog.CommunityDesignationStageId = memberDesignationStage.CommunityDesignationStageId;
+                    memberDesignationStageLog.DateCreated = DateTime.Now;
+                    memberDesignationStageLog.DateUpdated = DateTime.Now;
+                    memberDesignationStageLog.LastUpdateUsername = CurrentUser;
+                    memberDesignationStageLog.Status = "Completed Stage Review";
+                    memberDesignationStageLog.Code = "";
+                    memberDesignationStageLog.Comment = "";
+                    db.MemberDesignationStageLogs.Add(memberDesignationStageLog);
+                    db.SaveChanges();
+
+
+
+                    if (memberDesignationStage.Completed)
+                        MoveNextStage(stageId);
+
+                    Response.Redirect($"/designations/view.aspx?Id={ApplicationId}&memberId={MemberGUID}&tb=1");
+                }
+            }
+            if (e.CommandName == "completeStage")
+            {
+                int stageId = Convert.ToInt32(e.CommandArgument.ToString());
+                var communityStage = db.CommunityDesignationStages.FirstOrDefault(x => x.Id.Equals(stageId));
+                var memberDesignationStageLog = new MemberDesignationStageLog();
+                memberDesignationStageLog.MemberDesignationApplicationId = ApplicationId;
+                memberDesignationStageLog.CommunityId = CommunityGUID;
+                memberDesignationStageLog.TransactionId = Guid.NewGuid();
+                memberDesignationStageLog.MemberId = MemberGUID;
+                memberDesignationStageLog.DesignationStageId = communityStage.DesignationStageId;
+                memberDesignationStageLog.CommunityDesignationStageId = stageId;
+                memberDesignationStageLog.DateCreated = DateTime.Now;
+                memberDesignationStageLog.DateUpdated = DateTime.Now;
+                memberDesignationStageLog.LastUpdateUsername = CurrentUser;
+                memberDesignationStageLog.Status = "Completed Stage";
+                memberDesignationStageLog.Code = "";
+                memberDesignationStageLog.Comment = "";
+                db.MemberDesignationStageLogs.Add(memberDesignationStageLog);
+                db.SaveChanges();
+
+                var memberDesignationStage = db.MemberDesignationStages.FirstOrDefault(x => x.MemberDesignationApplicationId.Equals(ApplicationId) && x.CommunityDesignationStageId.Equals(stageId));
+                if (memberDesignationStage != null)
+                {
+                    memberDesignationStage.Completed = true;
+                    memberDesignationStage.AdminReview = false;
+                    memberDesignationStage.DateCreated = DateTime.Now;
+                    memberDesignationStage.DateUpdated = DateTime.Now;
+                    memberDesignationStage.AdminComment = "";
+                    memberDesignationStage.LastUpdateUsername = CurrentUser;
+                    memberDesignationStage.Archived = false;
+                    db.SaveChanges();
+                    MoveNextStage(stageId);
+                    Response.Redirect($"/designations/view.aspx?Id={ApplicationId}&memberId={MemberGUID}&tb=1");
+                }
+                else
+                {
+                    memberDesignationStage = new MemberDesignationStage();
+                    memberDesignationStage.MemberDesignationApplicationId = ApplicationId;
+                    memberDesignationStage.CommunityId = CommunityGUID;
+                    memberDesignationStage.TransactionId = Guid.NewGuid();
+                    memberDesignationStage.MemberId = MemberGUID;
+                    memberDesignationStage.DesignationStageId = communityStage.DesignationStageId;
+                    memberDesignationStage.CommunityDesignationStageId = stageId;
+                    memberDesignationStage.DateStarted = DateTime.Now;
+                    memberDesignationStage.DateCompleted = DateTime.Now;
+                    memberDesignationStage.Completed = true;
+                    memberDesignationStage.AdminReview = false;
+                    memberDesignationStage.DateCreated = DateTime.Now;
+                    memberDesignationStage.DateUpdated = DateTime.Now;
+                    memberDesignationStage.LastUpdateUsername = CurrentUser;
+                    memberDesignationStage.Archived = false;
+                    memberDesignationStage.AdminComment = "";
+                    memberDesignationStage.Code = "";
+                    db.MemberDesignationStages.Add(memberDesignationStage);
+                    db.SaveChanges();
+                    MoveNextStage(stageId);
+                    Response.Redirect($"/designations/view.aspx?Id={ApplicationId}&memberId={MemberGUID}&tb=1");
+                }
+            }
+
+            if (e.CommandName == "uncompleteStage")
+            {
+                int stageId = Convert.ToInt32(e.CommandArgument.ToString());
+                var communityStage = db.CommunityDesignationStages.FirstOrDefault(x => x.Id.Equals(stageId));
+                var memberDesignationStage = db.MemberDesignationStages.FirstOrDefault(x => x.MemberDesignationApplicationId.Equals(ApplicationId) && x.CommunityDesignationStageId.Equals(stageId));
+                if (memberDesignationStage != null)
+                {
+                  
+                    memberDesignationStage.Completed = false;
+                    memberDesignationStage.AdminReview = false;
+                    memberDesignationStage.DateCreated = DateTime.Now;
+                    memberDesignationStage.DateUpdated = DateTime.Now;
+                    memberDesignationStage.AdminComment = "";
+                    memberDesignationStage.LastUpdateUsername = CurrentUser;
+                    memberDesignationStage.Archived = false;
+                    db.SaveChanges();
+
+                    var currentStages = db.MemberDesignationStages.Where(x => x.MemberDesignationApplicationId.Equals(ApplicationId) && x.Completed == false && x.Id != memberDesignationStage.Id).OrderByDescending(x => x.DateCreated).ToList();
+
+                    int previousStage = 0;
+                    if (currentStages.Any())
+                    {
+                        previousStage = currentStages.FirstOrDefault().CommunityDesignationStageId;
+                        try
+                        {
+                            db.MemberDesignationStages.RemoveRange(currentStages);
+                            db.SaveChanges();
+                        }
+                        catch { }
+                    }
+
+                    var memberDesignationStageLog = new MemberDesignationStageLog();
+                    memberDesignationStageLog.MemberDesignationApplicationId = ApplicationId;
+                    memberDesignationStageLog.CommunityId = CommunityGUID;
+                    memberDesignationStageLog.TransactionId = Guid.NewGuid();
+                    memberDesignationStageLog.MemberId = MemberGUID;
+                    memberDesignationStageLog.DesignationStageId = communityStage.DesignationStageId;
+                    memberDesignationStageLog.PreviousCommunityDesignationStageId = previousStage;
+                    memberDesignationStageLog.CommunityDesignationStageId = stageId;
+                    memberDesignationStageLog.DateCreated = DateTime.Now;
+                    memberDesignationStageLog.DateUpdated = DateTime.Now;
+                    memberDesignationStageLog.LastUpdateUsername = CurrentUser;
+                    memberDesignationStageLog.Status = "Set as Not Completed";
+                    memberDesignationStageLog.Code = "";
+                    memberDesignationStageLog.Comment = "";
+                    db.MemberDesignationStageLogs.Add(memberDesignationStageLog);
+                    db.SaveChanges();
+
+
+
+                    Response.Redirect($"/designations/view.aspx?Id={ApplicationId}&memberId={MemberGUID}&tb=1");
+                }
+           
+            }
+        }
+
+
+
+        void MoveNextStage(int communityDesignationStageId)
+        {
+            var currentStage = db.CommunityDesignationStages.FirstOrDefault(x => x.CommunityId.Equals(CommunityGUID) && x.Id.Equals(communityDesignationStageId));
+            if (currentStage != null)
+            {
+
+                var pending = db.MemberDesignationStages.FirstOrDefault(x => x.MemberDesignationApplicationId.Equals(ApplicationId) && x.Completed.Equals(false));
+                if (pending != null)
+                {
+                    return;
+                }
+                int stageNumber = currentStage.StageNumber;
+                List<int> completedIds = db.MemberDesignationStages.Where(x => x.MemberDesignationApplicationId.Equals(ApplicationId)).Select(x => x.CommunityDesignationStageId).ToList();
+                var nextStage = db.CommunityDesignationStages.Where(x => x.CommunityId.Equals(CommunityGUID) && !completedIds.Contains(x.Id) && x.StageNumber > stageNumber).OrderBy(x => x.StageNumber).FirstOrDefault();
+                if (nextStage != null)
+                {
+                    var memberDesignationStage = db.MemberDesignationStages.FirstOrDefault(x => x.MemberDesignationApplicationId.Equals(ApplicationId) && x.CommunityDesignationStageId.Equals(nextStage.Id));
+                    if (memberDesignationStage == null)
+                    {
+                        memberDesignationStage = new MemberDesignationStage();
+                        memberDesignationStage.MemberDesignationApplicationId = ApplicationId;
+                        memberDesignationStage.CommunityId = CommunityGUID;
+                        memberDesignationStage.TransactionId = Guid.NewGuid();
+                        memberDesignationStage.MemberId = MemberGUID;
+                        memberDesignationStage.DesignationStageId = nextStage.DesignationStageId;
+                        memberDesignationStage.CommunityDesignationStageId = nextStage.Id;
+                        memberDesignationStage.DateStarted = DateTime.Now;
+                        memberDesignationStage.DateCompleted = DateTime.Now;
+                        memberDesignationStage.Completed = false;
+                        memberDesignationStage.AdminReview = false;
+                        memberDesignationStage.DateCreated = DateTime.Now;
+                        memberDesignationStage.DateUpdated = DateTime.Now;
+                        memberDesignationStage.LastUpdateUsername = CurrentUser;
+                        memberDesignationStage.Archived = false;
+                        memberDesignationStage.AdminComment = "";
+                        memberDesignationStage.Code = "";
+                        db.MemberDesignationStages.Add(memberDesignationStage);
+                        db.SaveChanges();
+                    }
+                }
+            }
+
+        }
+
+        protected void btnCancel_Click(object sender, EventArgs e)
+        {
+            var memberDesignation = db.MemberDesignationApplications.FirstOrDefault(x => x.Id.Equals(ApplicationId));
+            if(memberDesignation!=null)
+            {
+                memberDesignation.DesignationApplicationStatusId = 6;
+                memberDesignation.DateUpdated = DateTime.Now;
+                memberDesignation.LastUpdateUsername = CurrentUser;
+                db.SaveChanges();
+                Response.Redirect("manageapplications.aspx");
+            }
+        }
+    }
+}
